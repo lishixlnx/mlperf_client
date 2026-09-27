@@ -323,6 +323,24 @@ static EpInitOutcome EnsureAndRegisterEPs(Ort::Env& env, cil::Logger& logger) {
                      "for '") +
                      nm_utf8 + "': " + e.what());
         }
+        // The AMD GPU package is one plugin under two catalog names, and
+        // models reference either. Register the other name only after
+        // TryRegister succeeded. ORT keys registrations by name.
+        static const std::map<std::string, std::string> kAmdGpuAliases = {
+            {"AMDGPUExecutionProvider", "MIGraphXExecutionProvider"},
+            {"MIGraphXExecutionProvider", "AMDGPUExecutionProvider"}};
+        if (auto alias = kAmdGpuAliases.find(nm_utf8);
+            alias != kAmdGpuAliases.end()) {
+          try {
+            env.RegisterExecutionProviderLibrary(alias->second.c_str(), path);
+            logger(cil::LogLevel::kInfo,
+                   "Also registered the same library as " + alias->second);
+          } catch (const std::exception& e) {
+            logger(cil::LogLevel::kInfo,
+                   "Alias registration for " + alias->second +
+                       " skipped: " + e.what());
+          }
+        }
         found_ready_ep = true;
       } catch (const std::exception& e) {
         logger(cil::LogLevel::kWarning,
@@ -572,9 +590,16 @@ void BaseInference::DetectWindowsMLDevices(
       {"NvTensorRTRTXExecutionProvider", "NvTensorRtRtx"},
       {"DmlExecutionProvider", "DirectML"}};
 
+  // The AMD GPU EP has no alias: its catalog name is what scenarios request,
+  // and it reports real OrtEpDevices, so it needs no entry in the
+  // "registered but reports no device" fallback below.
   static const std::set<std::string> supported_eps = {
-      "CPU",     "DirectML", "OpenVINO",     "QNN",
-      "VitisAI", "RyzenAI",  "NvTensorRtRtx"};
+      "CPU",     "DirectML", "OpenVINO",      "QNN",
+      "VitisAI", "RyzenAI",  "NvTensorRtRtx", "AMDGPUExecutionProvider",
+#if MLPERF_WINDOWSML_ENABLE_MIGRAPHX
+      "MIGraphXExecutionProvider",
+#endif
+  };
 
   std::vector<Ort::ConstEpDevice> ep_devices = env.GetEpDevices();
 
@@ -872,6 +897,16 @@ void BaseInference::AssignModelForDevices() {
               } else if (option.contains("NvTensorRtRtx")) {
                 available_providers.insert("NvTensorRtRtx");
                 execution_providers.insert("NvTensorRtRtx");
+              } else if (option.contains("AMDGPUExecutionProvider") ||
+                         option.contains("MIGraphXExecutionProvider")) {
+                // The AMD GPU package publishes one plugin under two catalog
+                // names, and models in the wild use either. Claim both so the
+                // model matches whichever name the device was enumerated with.
+                for (const char* ep :
+                     {"AMDGPUExecutionProvider", "MIGraphXExecutionProvider"}) {
+                  available_providers.insert(ep);
+                  execution_providers.insert(ep);
+                }
               }
             }
           }
